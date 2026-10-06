@@ -1,0 +1,60 @@
+# Smoke test / debug config
+# Ultra-small model and token budget for fast CI / sanity checks.
+# All five methods (DP, SW, SNOO, PeriodicAvg, DiLoCo) should complete in < 60s.
+
+run_name: debug_smoke
+experiment_id: smoke
+
+model:
+  preset: debug      # 2 layers, d_model=64, n_heads=2, seq_len=128
+  dropout: 0.0
+  bias: true
+
+data:
+  corpus: synthetic
+  tokenizer: gpt2
+  token_budget: 10000        # 10K tokens
+  eval_token_budget: 2000
+  shard_mode: iid
+  shard_seed: 0
+  seq_len: 32
+  num_workers: 0
+
+inner_optimizer:
+  lr: 1.0e-3
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 0.1
+  grad_clip: 1.0
+  warmup_tokens: 500
+  min_lr_ratio: 0.1
+
+outer_optimizer:
+  type: nesterov
+  outer_lr: 0.7
+  momentum: 0.9
+  nesterov: true
+  reset_inner: true
+
+distribution:
+  method: diloco       # override per method in smoke_test.py
+  M_workers: 2
+  H_inner_steps: 5
+  local_batch_size: 4
+  grad_accumulation: 1
+
+runtime:
+  seed: 0
+  device: cpu
+  precision: fp32
+  compile: false
+  distributed_backend: gloo
+
+eval:
+  eval_every_tokens: 5000
+  log_every_steps: 5
+  checkpoint_every_tokens: 10000
+  use_wandb: false
+  wandb_project: cs769-diloco
+
+output_dir: runs/smoke

@@ -1,0 +1,50 @@
+# E5 — Clone-DiLoCo: Data Diversity Ablation
+# In Clone-DiLoCo, all workers receive the IDENTICAL data stream.
+# Tests how much gain comes from data diversity vs stochastic diversity from noise.
+
+run_name: e5_clone_diloco_160m
+experiment_id: E5
+
+model:
+  preset: 160m
+
+data:
+  corpus: synthetic
+  token_budget: 100_000_000
+  eval_token_budget: 200_000
+  shard_mode: clone        # IDENTICAL sequence stream for all workers
+  seq_len: 512
+
+inner_optimizer:
+  lr: 0.0006
+  betas: [0.9, 0.95]
+  eps: 1.0e-08
+  weight_decay: 0.1
+  grad_clip: 1.0
+  warmup_tokens: 1_000_000
+  min_lr_ratio: 0.1
+
+outer_optimizer:
+  type: nesterov
+  outer_lr: 0.7
+  momentum: 0.9
+  nesterov: true
+  reset_inner: true
+
+distribution:
+  method: clone_diloco
+  M_workers: 4
+  H_inner_steps: 100
+  local_batch_size: 16
+  grad_accumulation: 1
+
+runtime:
+  seed: 0
+  device: cpu
+  precision: fp32
+
+eval:
+  eval_every_tokens: 2_000_000
+  log_every_steps: 20
+  checkpoint_every_tokens: 20_000_000
+  use_wandb: false

@@ -1,0 +1,57 @@
+# E0 — Harness Equivalence (Gate 1)
+# Goal: confirm that the training harness produces identical loss traces
+# for DP-AdamW at 1 device, and that token/FLOP/comm accounting is correct.
+# Run on ~60M model with a tiny synthetic corpus.
+
+run_name: e0_harness_1device
+experiment_id: E0
+
+model:
+  preset: "60m"
+  dropout: 0.0
+  bias: true
+
+data:
+  corpus: synthetic
+  tokenizer: gpt2
+  token_budget: 500000       # 500K tokens (fast harness check)
+  eval_token_budget: 50000
+  shard_mode: iid
+  shard_seed: 42
+  seq_len: 512
+  num_workers: 0
+
+inner_optimizer:
+  lr: 3.0e-4
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 0.1
+  grad_clip: 1.0
+  warmup_tokens: 50000
+  min_lr_ratio: 0.1
+
+outer_optimizer:
+  type: none
+
+distribution:
+  method: dp_adamw
+  M_workers: 1
+  H_inner_steps: 1
+  local_batch_size: 4
+  grad_accumulation: 1
+
+runtime:
+  seed: 0
+  device: cpu
+  precision: fp32
+  compile: false
+  distributed_backend: gloo
+
+eval:
+  eval_every_tokens: 100000
+  log_every_steps: 20
+  checkpoint_every_tokens: 500000
+  use_wandb: false
+  wandb_project: cs769-diloco
+
+output_dir: runs

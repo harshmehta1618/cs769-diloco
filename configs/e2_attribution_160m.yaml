@@ -1,0 +1,62 @@
+# E2 — Main Causal Decomposition (160M model)
+# Compares: DP-AdamW, SW-AdamW, SNOO, PeriodicAvg, DiLoCo
+# at H=100, M=4, 3 seeds
+# This is the PRIMARY experiment for the paper.
+
+run_name: e2_diloco_160m_h100_seed0
+experiment_id: E2
+
+model:
+  preset: "160m"
+  dropout: 0.0
+  bias: true
+
+data:
+  corpus: c4            # or "synthetic" for local testing
+  tokenizer: gpt2
+  token_budget: 2000000000   # 2B tokens
+  eval_token_budget: 5000000
+  shard_mode: iid
+  shard_seed: 42
+  seq_len: 1024
+  num_workers: 4
+
+inner_optimizer:
+  lr: 3.0e-4
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 0.1
+  grad_clip: 1.0
+  warmup_tokens: 40000000   # 2% of 2B
+  min_lr_ratio: 0.1
+
+outer_optimizer:
+  type: nesterov
+  outer_lr: 0.7
+  momentum: 0.9
+  nesterov: true
+  reset_inner: true
+
+distribution:
+  method: diloco       # dp_adamw | sw_adamw | snoo | periodic_avg | diloco
+  M_workers: 4
+  H_inner_steps: 100
+  local_batch_size: 32
+  grad_accumulation: 1
+
+runtime:
+  seed: 0              # Change to 1, 2 for multi-seed runs
+  device: cuda
+  precision: bf16
+  compile: true
+  distributed_backend: nccl
+
+eval:
+  eval_every_tokens: 200000000    # every 200M tokens
+  log_every_steps: 10
+  checkpoint_every_tokens: 500000000
+  use_wandb: true
+  wandb_project: cs769-diloco
+  downstream_tasks: ["hellaswag", "piqa", "arc_easy"]
+
+output_dir: runs

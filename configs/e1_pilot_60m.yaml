@@ -1,0 +1,51 @@
+# E1 — 60M Pilot Experiment
+# Quick validation on 60M model before launching full 160M runs.
+# Compares: DP-AdamW, SNOO, DiLoCo (M=2, H=100)
+# Token budget: 20M tokens
+
+run_name: e1_pilot_60m
+experiment_id: E1
+
+model:
+  preset: 60m
+
+data:
+  corpus: synthetic
+  token_budget: 20_000_000
+  eval_token_budget: 100_000
+  shard_mode: iid
+  seq_len: 256
+
+inner_optimizer:
+  lr: 0.001
+  betas: [0.9, 0.95]
+  eps: 1.0e-08
+  weight_decay: 0.1
+  grad_clip: 1.0
+  warmup_tokens: 500_000
+  min_lr_ratio: 0.1
+
+outer_optimizer:
+  type: nesterov
+  outer_lr: 0.7
+  momentum: 0.9
+  nesterov: true
+  reset_inner: true
+
+distribution:
+  method: diloco
+  M_workers: 2
+  H_inner_steps: 100
+  local_batch_size: 16
+  grad_accumulation: 1
+
+runtime:
+  seed: 42
+  device: cpu
+  precision: fp32
+
+eval:
+  eval_every_tokens: 500_000
+  log_every_steps: 20
+  checkpoint_every_tokens: 5_000_000
+  use_wandb: false

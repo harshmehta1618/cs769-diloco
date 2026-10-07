@@ -57,9 +57,15 @@ class DPAdamWTrainer(BaseTrainer):
             # Gradient accumulation loop
             for micro_step in range(accum_steps):
                 input_ids, targets = self._next_batch(worker_idx=0)
-                _, loss = self.model(input_ids, targets)
-                loss    = loss / accum_steps
-                loss.backward()
+                with torch.autocast(device_type=self.device.type, dtype=self.amp_dtype, enabled=self.use_amp):
+                    _, loss = self.model(input_ids, targets)
+                    loss    = loss / accum_steps
+
+                if self.scaler.is_enabled():
+                    self.scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+
                 loss_accum += loss.item()
                 n_tokens = self._count_tokens(targets)
                 self.token_counter.step(n_tokens)

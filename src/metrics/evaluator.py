@@ -35,10 +35,14 @@ class Evaluator:
         eval_data_iter: Iterator,
         n_eval_tokens: int,
         device: torch.device,
+        use_amp: bool = False,
+        amp_dtype: torch.dtype = torch.float32,
     ) -> None:
         self._iter          = eval_data_iter
         self.n_eval_tokens  = n_eval_tokens
         self._device        = device
+        self.use_amp        = use_amp
+        self.amp_dtype      = amp_dtype
 
     def evaluate(self, model: nn.Module) -> dict:
         """
@@ -56,7 +60,8 @@ class Evaluator:
                 batch = batch.to(self._device)
                 input_ids = batch[:, :-1].contiguous()
                 targets   = batch[:, 1:].contiguous()
-                _, loss   = model(input_ids, targets)
+                with torch.autocast(device_type=self._device.type, dtype=self.amp_dtype, enabled=self.use_amp):
+                    _, loss = model(input_ids, targets)
                 n_tok     = targets.numel()
                 total_loss   += loss.item() * n_tok
                 total_tokens += n_tok
@@ -75,6 +80,41 @@ class Evaluator:
             "val_ppl":    val_ppl,
             "val_tokens": total_tokens,
         }
+
+    def evaluate_downstream(
+        self,
+        model: nn.Module,
+        tasks: List[str],
+    ) -> Dict[str, float]:
+        """
+        Evaluate on downstream zero-shot tasks (HellaSwag, PIQA, ARC-Easy).
+        Uses lm-evaluation-harness if available; gracefully logs warning otherwise.
+        """
+        if not tasks:
+            return {}
+
+        results: Dict[str, float] = {}
+        try:
+            import lm_eval  # type: ignore
+            # lm-evaluation-harness API
+            task_dict = lm_eval.evaluator.simple_evaluate(
+                model="hf",
+                model_args=model,
+                tasks=tasks,
+                device=str(self._device),
+                batch_size="auto",
+            )
+            for t in tasks:
+                if t in task_dict.get("results", {}):
+                    acc = task_dict["results"][t].get("acc,none", float("nan"))
+                    results[f"downstream_{t}_acc"] = acc
+        except ImportError:
+            for t in tasks:
+                results[f"downstream_{t}_acc"] = float("nan")
+        except Exception:
+            for t in tasks:
+                results[f"downstream_{t}_acc"] = float("nan")
+        return results
 
 
 # ---------------------------------------------------------------------------

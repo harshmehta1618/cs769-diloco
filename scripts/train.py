@@ -24,6 +24,11 @@ import os
 import random
 import sys
 from pathlib import Path
+import io
+
+# Force UTF-8 output on Windows
+if hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 import torch
 import numpy as np
@@ -71,6 +76,9 @@ def build_model_from_cfg(cfg: RunConfig) -> torch.nn.Module:
         val = getattr(mc, attr)
         if val > 0:
             setattr(base, attr, val)
+    # Default model seq_len to data seq_len if not explicitly overridden
+    if mc.seq_len == 0 and cfg.data.seq_len > 0:
+        base.seq_len = cfg.data.seq_len
     base.dropout = mc.dropout
     base.bias    = mc.bias
     base.__post_init__()
@@ -122,12 +130,40 @@ def main() -> None:
     )
     parser.add_argument("--log_geometry", action="store_true",
                         help="Log worker-diversity geometry metrics (E3; slower)")
+    parser.add_argument("--dry_run", action="store_true",
+                        help="Execute a minimal 1-2 step verification run to validate pipeline & memory")
     args = parser.parse_args()
 
     # Load + override config
     cfg = load_config(args.config)
     if args.override:
         cfg = apply_overrides(cfg, args.override)
+
+    if args.dry_run:
+        logger.info("[DRY-RUN] MODE ACTIVATED: executing 1-2 steps to verify pipeline, GPU memory, and checkpointing.")
+        cfg.distribution.local_batch_size = min(cfg.distribution.local_batch_size, 4)
+        cfg.data.seq_len = min(cfg.data.seq_len, 128)
+        cfg.data.num_workers = 0
+        step_tokens = max(cfg.distribution.local_batch_size * cfg.data.seq_len, 128)
+        cfg.data.token_budget = step_tokens * max(cfg.distribution.M_workers, 1) * 2
+        cfg.data.eval_token_budget = step_tokens
+        cfg.eval.eval_every_tokens = 1
+        cfg.eval.checkpoint_every_tokens = 1
+        cfg.eval.use_wandb = False
+        if cfg.distribution.H_inner_steps > 2:
+            cfg.distribution.H_inner_steps = 2
+        if cfg.distribution.M_workers > 2:
+            cfg.distribution.M_workers = 2
+        is_cpu = (cfg.runtime.device == "cpu") or not torch.cuda.is_available()
+        if is_cpu and cfg.model.preset in ("160m", "410m", "1b"):
+            logger.info("[DRY-RUN] Running on CPU: testing with '60m' architecture to match CPU memory constraints.")
+            cfg.model.preset = "60m"
+        try:
+            import datasets  # type: ignore
+        except ImportError:
+            if cfg.data.corpus != "synthetic":
+                logger.info("[DRY-RUN] 'datasets' package not found in current environment. Using synthetic tokens for dry-run verification.")
+                cfg.data.corpus = "synthetic"
 
     logger.info(f"Run: {cfg.run_name}  |  method: {cfg.distribution.method}")
     logger.info(f"Token budget: {cfg.data.token_budget:,}")
@@ -139,16 +175,19 @@ def main() -> None:
     device = resolve_device(cfg.runtime.device)
     logger.info(f"Device: {device}")
 
-    # Mixed precision (if requested)
-    if cfg.runtime.precision in ("bf16", "fp16") and device.type == "cuda":
-        torch.set_default_dtype(
-            torch.bfloat16 if cfg.runtime.precision == "bf16" else torch.float16
-        )
+    logger.info(f"Precision: {cfg.runtime.precision} (handled via torch.autocast)")
 
     # Model
     model = build_model_from_cfg(cfg)
     if cfg.runtime.compile and hasattr(torch, "compile"):
-        model = torch.compile(model)
+        if device.type == "cpu":
+            logger.info("torch.compile: skipping on CPU to avoid host C++ compiler dependency.")
+        else:
+            try:
+                model = torch.compile(model)
+                logger.info("Model compiled with torch.compile()")
+            except Exception as e:
+                logger.warning(f"torch.compile failed: {e}. Running in standard eager mode.")
 
     # Data
     d = cfg.data
@@ -195,12 +234,23 @@ def main() -> None:
                             log_geometry=args.log_geometry)
     results = trainer.train()
 
+    # Downstream evaluation (if requested)
+    if cfg.eval.downstream_tasks:
+        logger.info(f"Evaluating downstream zero-shot tasks: {cfg.eval.downstream_tasks}")
+        downstream_metrics = trainer.evaluator.evaluate_downstream(trainer.model, cfg.eval.downstream_tasks)
+        for t_k, t_v in downstream_metrics.items():
+            logger.info(f"  {t_k}: {t_v}")
+        results.update(downstream_metrics)
+
     logger.info("=" * 60)
     logger.info("Training complete.")
     for k, v in results.items():
         if not isinstance(v, dict):
             logger.info(f"  {k}: {v}")
     logger.info("=" * 60)
+
+    if args.dry_run:
+        logger.info("[DRY-RUN] SUCCESSFUL: verified model initialization, forward pass, backward pass, checkpointing, and evaluation.")
 
 
 if __name__ == "__main__":

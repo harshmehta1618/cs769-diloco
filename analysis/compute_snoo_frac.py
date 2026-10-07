@@ -18,6 +18,11 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import io
+
+# Force UTF-8 output on Windows
+if hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.metrics.evaluator import snoo_recovery_fraction
@@ -117,7 +122,7 @@ def main():
     else:
         print(f"  SNOO recovery fraction: {frac:.3f}  ({frac*100:.1f}%)")
         if frac > 0.8:
-            interp = "Most gain is from outer Nesterov (SNOO ≈ DiLoCo > DP)"
+            interp = "Most gain is from outer Nesterov (SNOO ~= DiLoCo > DP)"
         elif frac > 0.4:
             interp = "Outer optimizer + worker diversity both contribute"
         else:

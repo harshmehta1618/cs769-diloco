@@ -69,11 +69,29 @@ class BaseTrainer(ABC):
         # Communication tracker (tracks outer-sync payload)
         self.comm_tracker = CommunicationTracker()
 
+        # Precision & AMP
+        prec = cfg.runtime.precision.lower()
+        if prec == "bf16":
+            self.amp_dtype = torch.bfloat16
+        elif prec == "fp16":
+            self.amp_dtype = torch.float16
+        else:
+            self.amp_dtype = torch.float32
+
+        self.use_amp = (prec in ("bf16", "fp16")) and (device.type == "cuda")
+        # GradScaler for fp16
+        if hasattr(torch.amp, "GradScaler"):
+            self.scaler = torch.amp.GradScaler("cuda", enabled=(prec == "fp16" and device.type == "cuda"))
+        else:
+            self.scaler = torch.cuda.amp.GradScaler(enabled=(prec == "fp16" and device.type == "cuda"))
+
         # Evaluator
         self.evaluator = Evaluator(
             eval_data_iter=eval_iter,
             n_eval_tokens=cfg.data.eval_token_budget,
             device=device,
+            use_amp=self.use_amp,
+            amp_dtype=self.amp_dtype,
         )
 
         # Output
@@ -120,10 +138,16 @@ class BaseTrainer(ABC):
 
     def _clip_and_step(self) -> float:
         """Gradient clipping + inner optimizer step. Returns grad norm."""
+        if self.scaler.is_enabled():
+            self.scaler.unscale_(self.optimizer)
         grad_norm = nn.utils.clip_grad_norm_(
             self.model.parameters(), self.cfg.inner_optimizer.grad_clip
         ).item()
-        self.optimizer.step()
+        if self.scaler.is_enabled():
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
         return grad_norm
 

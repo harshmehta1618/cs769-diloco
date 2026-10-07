@@ -40,12 +40,15 @@ def run_cmd(cmd: list[str]) -> bool:
     return True
 
 
-def run_e0():
+def run_e0(dry_run: bool = False):
     print("=== Running E0: Harness Equivalence ===")
-    return run_cmd([sys.executable, "scripts/train.py", "--config", "configs/e0_harness.yaml"])
+    cmd = [sys.executable, "scripts/train.py", "--config", "configs/e0_harness.yaml"]
+    if dry_run:
+        cmd.append("--dry_run")
+    return run_cmd(cmd)
 
 
-def run_e1(seeds: list[int]):
+def run_e1(seeds: list[int], dry_run: bool = False):
     print("=== Running E1: 60M Pilot ===")
     methods = ["dp_adamw", "snoo", "diloco"]
     success = True
@@ -60,12 +63,14 @@ def run_e1(seeds: list[int]):
                 f"distribution.method={method}",
                 f"runtime.seed={seed}",
             ]
+            if dry_run:
+                cmd.append("--dry_run")
             if not run_cmd(cmd):
                 success = False
     return success
 
 
-def run_e2(seeds: list[int]):
+def run_e2(seeds: list[int], dry_run: bool = False):
     print("=== Running E2: Main Causal Decomposition (160M) ===")
     methods = ["dp_adamw", "sw_adamw", "snoo", "periodic_avg", "diloco"]
     success = True
@@ -80,12 +85,14 @@ def run_e2(seeds: list[int]):
                 f"distribution.method={method}",
                 f"runtime.seed={seed}",
             ]
+            if dry_run:
+                cmd.append("--dry_run")
             if not run_cmd(cmd):
                 success = False
     return success
 
 
-def run_e3(horizons: list[int], seeds: list[int]):
+def run_e3(horizons: list[int], seeds: list[int], dry_run: bool = False):
     print("=== Running E3: Horizon H Sensitivity ===")
     methods = ["diloco", "periodic_avg"]
     success = True
@@ -102,12 +109,14 @@ def run_e3(horizons: list[int], seeds: list[int]):
                     f"distribution.H_inner_steps={h}",
                     f"runtime.seed={seed}",
                 ]
+                if dry_run:
+                    cmd.append("--dry_run")
                 if not run_cmd(cmd):
                     success = False
     return success
 
 
-def run_e4(workers: list[int], seeds: list[int]):
+def run_e4(workers: list[int], seeds: list[int], dry_run: bool = False):
     print("=== Running E4: Worker M Scaling ===")
     methods = ["diloco", "periodic_avg"]
     success = True
@@ -124,12 +133,14 @@ def run_e4(workers: list[int], seeds: list[int]):
                     f"distribution.M_workers={m}",
                     f"runtime.seed={seed}",
                 ]
+                if dry_run:
+                    cmd.append("--dry_run")
                 if not run_cmd(cmd):
                     success = False
     return success
 
 
-def run_e5(seeds: list[int]):
+def run_e5(seeds: list[int], dry_run: bool = False):
     print("=== Running E5: Clone-DiLoCo Data Diversity Ablation ===")
     success = True
     for seed in seeds:
@@ -141,6 +152,8 @@ def run_e5(seeds: list[int]):
             f"run_name={run_name}",
             f"runtime.seed={seed}",
         ]
+        if dry_run:
+            cmd.append("--dry_run")
         if not run_cmd(cmd):
             success = False
     return success
@@ -152,20 +165,21 @@ def main():
     parser.add_argument("--seeds", nargs="+", type=int, default=[0], help="Random seeds to evaluate")
     parser.add_argument("--horizons", nargs="+", type=int, default=[50, 100, 200, 500], help="H values for E3")
     parser.add_argument("--workers", nargs="+", type=int, default=[1, 2, 4, 8], help="M worker counts for E4")
+    parser.add_argument("--dry_run", action="store_true", help="Execute 1-2 step dry run verification across runs")
     args = parser.parse_args()
 
     if args.experiment in ("E0", "all"):
-        run_e0()
+        run_e0(dry_run=args.dry_run)
     if args.experiment in ("E1", "all"):
-        run_e1(args.seeds)
+        run_e1(args.seeds, dry_run=args.dry_run)
     if args.experiment in ("E2", "all"):
-        run_e2(args.seeds)
+        run_e2(args.seeds, dry_run=args.dry_run)
     if args.experiment in ("E3", "all"):
-        run_e3(args.horizons, args.seeds)
+        run_e3(args.horizons, args.seeds, dry_run=args.dry_run)
     if args.experiment in ("E4", "all"):
-        run_e4(args.workers, args.seeds)
+        run_e4(args.workers, args.seeds, dry_run=args.dry_run)
     if args.experiment in ("E5", "all"):
-        run_e5(args.seeds)
+        run_e5(args.seeds, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

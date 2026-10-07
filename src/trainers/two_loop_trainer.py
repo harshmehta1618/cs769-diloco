@@ -141,7 +141,8 @@ class TwoLoopTrainer(BaseTrainer):
 
         for h in range(H):
             input_ids, targets = self._next_batch(worker_idx)
-            _, loss = wm(input_ids, targets)
+            with torch.autocast(device_type=self.device.type, dtype=self.amp_dtype, enabled=self.use_amp):
+                _, loss = wm(input_ids, targets)
             loss.backward()
             nn.utils.clip_grad_norm_(wm.parameters(), io.grad_clip)
             # Token-driven LR update (same formula as DP-AdamW)
@@ -158,30 +159,29 @@ class TwoLoopTrainer(BaseTrainer):
             wopt.step()
             wopt.zero_grad(set_to_none=True)
 
-    def _compute_pseudo_gradients(
+    def _compute_and_average_pseudo_gradients(
         self, ref_params: Dict[str, torch.Tensor]
-    ) -> List[Dict[str, torch.Tensor]]:
+    ) -> tuple[Dict[str, torch.Tensor], Optional[List[Dict[str, torch.Tensor]]]]:
         """
-        Δ_w = θ_ref − θ_w   for each worker w.
+        Computes the averaged pseudo-gradient directly in-place to minimize peak memory:
+          avg_Δ = mean_w(θ_ref - θ_w)
+        If self.log_geometry is True, also retains per-worker pseudo-gradients.
         """
-        pseudo_grads = []
-        for wm in self.worker_models:
-            pg = {
-                name: ref_params[name] - p.data
-                for name, p in wm.named_parameters()
-            }
-            pseudo_grads.append(pg)
-        return pseudo_grads
+        M = len(self.worker_models)
+        avg_pseudo_grad = {name: torch.zeros_like(p) for name, p in self.model.named_parameters()}
+        pseudo_grads = [] if self.log_geometry else None
 
-    def _average_pseudo_gradients(
-        self, pseudo_grads: List[Dict[str, torch.Tensor]]
-    ) -> Dict[str, torch.Tensor]:
-        """avg_Δ = mean_w(Δ_w)"""
-        M = len(pseudo_grads)
-        avg = {}
-        for name in pseudo_grads[0]:
-            avg[name] = sum(pg[name] for pg in pseudo_grads) / M
-        return avg
+        for wm in self.worker_models:
+            pg = {} if self.log_geometry else None
+            for name, p in wm.named_parameters():
+                diff = ref_params[name] - p.data
+                avg_pseudo_grad[name].add_(diff, alpha=1.0 / M)
+                if self.log_geometry:
+                    pg[name] = diff
+            if self.log_geometry:
+                pseudo_grads.append(pg)
+
+        return avg_pseudo_grad, pseudo_grads
 
     def _apply_outer_step(
         self,
@@ -251,9 +251,8 @@ class TwoLoopTrainer(BaseTrainer):
                 # Budget too small for even one outer step — still update
                 pass
 
-            # Step 4: compute pseudo-gradients
-            pseudo_grads    = self._compute_pseudo_gradients(ref_params)
-            avg_pseudo_grad = self._average_pseudo_gradients(pseudo_grads)
+            # Step 4: compute and average pseudo-gradients
+            avg_pseudo_grad, pseudo_grads = self._compute_and_average_pseudo_gradients(ref_params)
 
             # Step 5: apply outer optimizer
             new_params = self._apply_outer_step(ref_params, avg_pseudo_grad, outer_step)
@@ -269,7 +268,8 @@ class TwoLoopTrainer(BaseTrainer):
             with torch.no_grad():
                 self.model.eval()
                 inp, tgt = self._next_batch(0)
-                _, train_loss = self.model(inp, tgt)
+                with torch.autocast(device_type=self.device.type, dtype=self.amp_dtype, enabled=self.use_amp):
+                    _, train_loss = self.model(inp, tgt)
                 train_loss = train_loss.item()
                 self.model.train()
 

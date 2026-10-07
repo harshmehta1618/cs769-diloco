@@ -52,32 +52,83 @@ class SyntheticTokenDataset(IterableDataset):
 
 class TokenStreamDataset(IterableDataset):
     """
-    Streams pre-tokenized token arrays from a HuggingFace dataset column.
+    Streams and packs tokens from a HuggingFace dataset (in-memory or streaming).
+
+    Supports:
+      - Datasets with "text" column (tokenizes on-the-fly with tokenizer_name)
+      - Pre-tokenized datasets with "input_ids" column
+      - Packing variable-length sequences into fixed-length (seq_len + 1) blocks
+      - Infinite cyclic stream or bounded token stream
 
     Parameters
     ----------
-    hf_dataset : datasets.Dataset
-        A HuggingFace dataset with an "input_ids" column (list[int]).
+    hf_dataset : datasets.Dataset or datasets.IterableDataset
+        A HuggingFace dataset yielding dicts with "text" or "input_ids".
+    tokenizer_name : str
+        HuggingFace tokenizer identifier (e.g. "gpt2").
     seq_len : int
-        Context window length. The dataset packs examples back-to-back.
+        Context window length. Emits chunks of size seq_len + 1.
     seed : int
         Shuffle seed for this worker's shard.
     """
 
-    def __init__(self, hf_dataset, seq_len: int, seed: int = 0) -> None:
-        self._ds      = hf_dataset
-        self.seq_len  = seq_len
-        self._seed    = seed
+    def __init__(
+        self,
+        hf_dataset,
+        tokenizer_name: str = "gpt2",
+        seq_len: int = 512,
+        seed: int = 0,
+    ) -> None:
+        self._ds            = hf_dataset
+        self.tokenizer_name = tokenizer_name
+        self.seq_len        = seq_len
+        self._seed          = seed
+        self._tokenizer     = None
+
+    def _get_tokenizer(self):
+        if self._tokenizer is None:
+            try:
+                from transformers import AutoTokenizer  # type: ignore
+                tok = AutoTokenizer.from_pretrained(self.tokenizer_name, use_fast=True)
+                if tok.pad_token is None:
+                    tok.pad_token = tok.eos_token
+                self._tokenizer = tok
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load tokenizer '{self.tokenizer_name}'. "
+                    f"Ensure `transformers` is installed. Error: {e}"
+                )
+        return self._tokenizer
 
     def __iter__(self) -> Iterator[Tensor]:
-        rng = random.Random(self._seed)
-        indices = list(range(len(self._ds)))
-        rng.shuffle(indices)
+        tokenizer = None
         buf: list[int] = []
+
+        # Apply shuffle if streaming dataset supports it
+        ds_iter = self._ds
+        if hasattr(ds_iter, "shuffle"):
+            try:
+                ds_iter = ds_iter.shuffle(seed=self._seed, buffer_size=10_000)
+            except Exception:
+                pass
+
         while True:
-            rng.shuffle(indices)
-            for idx in indices:
-                buf.extend(self._ds[idx]["input_ids"])
+            for item in ds_iter:
+                if "input_ids" in item:
+                    tok_ids = item["input_ids"]
+                elif "text" in item:
+                    if tokenizer is None:
+                        tokenizer = self._get_tokenizer()
+                    text = item["text"]
+                    if not text:
+                        continue
+                    tok_ids = tokenizer.encode(text)
+                    if tokenizer.eos_token_id is not None:
+                        tok_ids.append(tokenizer.eos_token_id)
+                else:
+                    continue
+
+                buf.extend(tok_ids)
                 while len(buf) >= self.seq_len + 1:
                     chunk = buf[: self.seq_len + 1]
                     buf   = buf[self.seq_len + 1 :]
@@ -104,15 +155,19 @@ def build_worker_datasets(
     Parameters
     ----------
     corpus       : "synthetic" | "c4" | "dolma" | "fineweb"
+    tokenizer_name : "gpt2" or huggingface tokenizer name
+    seq_len      : sequence length
     M_workers    : number of replicas (1 for SNOO/SW-AdamW)
     shard_mode   : "iid" | "domain_skew" | "clone" | "shuffle"
     shard_seed   : base seed; each worker offset by worker index
+    vocab_size   : vocabulary size
+    token_budget : total training tokens
     """
 
     if corpus == "synthetic":
         datasets = []
         for w in range(M_workers):
-            # clone mode → all workers share seed 0
+            # clone mode -> all workers share identical seed
             worker_seed = shard_seed if shard_mode == "clone" else shard_seed + w
             datasets.append(SyntheticTokenDataset(vocab_size, seq_len, seed=worker_seed))
         return datasets
@@ -124,16 +179,40 @@ def build_worker_datasets(
         raise ImportError("Install `datasets` to use real corpora: pip install datasets")
 
     if corpus == "c4":
-        base_ds = load_dataset("c4", "en", split="train", streaming=True)
+        dataset_name = "allenai/c4"
+        dataset_subset = "en"
     elif corpus == "fineweb":
-        base_ds = load_dataset("HuggingFaceFW/fineweb", split="train", streaming=True)
+        dataset_name = "HuggingFaceFW/fineweb"
+        dataset_subset = None
     else:
         raise ValueError(f"Unsupported corpus: {corpus!r}")
 
     datasets = []
     for w in range(M_workers):
         worker_seed = shard_seed if shard_mode == "clone" else shard_seed + w
-        datasets.append(TokenStreamDataset(base_ds, seq_len=seq_len, seed=worker_seed))
+        worker_shard_idx = 0 if shard_mode == "clone" else w
+
+        # Load streaming split
+        if dataset_subset:
+            ds = load_dataset(dataset_name, dataset_subset, split="train", streaming=True)
+        else:
+            ds = load_dataset(dataset_name, split="train", streaming=True)
+
+        # Worker sharding for streaming dataset
+        if M_workers > 1 and shard_mode != "clone" and hasattr(ds, "shard"):
+            try:
+                ds = ds.shard(num_shards=M_workers, index=worker_shard_idx)
+            except Exception:
+                pass
+
+        datasets.append(
+            TokenStreamDataset(
+                hf_dataset=ds,
+                tokenizer_name=tokenizer_name,
+                seq_len=seq_len,
+                seed=worker_seed,
+            )
+        )
 
     return datasets
 

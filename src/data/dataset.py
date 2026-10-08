@@ -113,7 +113,9 @@ class TokenStreamDataset(IterableDataset):
                 pass
 
         while True:
+            processed_any = False
             for item in ds_iter:
+                processed_any = True
                 if "input_ids" in item:
                     tok_ids = item["input_ids"]
                 elif "text" in item:
@@ -133,6 +135,9 @@ class TokenStreamDataset(IterableDataset):
                     chunk = buf[: self.seq_len + 1]
                     buf   = buf[self.seq_len + 1 :]
                     yield torch.tensor(chunk, dtype=torch.long)
+
+            if not processed_any:
+                break
 
 
 # ---------------------------------------------------------------------------
